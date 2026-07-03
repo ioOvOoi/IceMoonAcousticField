@@ -3,8 +3,7 @@
 #include "IMAcousticFieldActor.h"
 #include "DA_IM_MaterialMap.h"
 #include "DA_IM_AcousticFieldConfig.h"
-#include "IMMathUtils.h"
-#include "IM_Common/Public/Gameplay/IMViewUtils.h"
+#include "IMAcousticFieldMath.h"
 #include "Kismet/GameplayStatics.h"
 #include "Runtime/PhysicsCore/Public/PhysicalMaterials/PhysicalMaterial.h" 
 
@@ -14,6 +13,35 @@ static TWeakObjectPtr<AIceMoonAcousticField> GWorldAcousticActor; // 静态实�
 DEFINE_STAT(STAT_IMAcousticField_Tick);
 DEFINE_STAT(STAT_IMAcousticField_TraceCallback);
 DEFINE_STAT(STAT_IMAcousticField_Query);
+
+/** 本地 listener 位置解析 - 替代 IMViewUtils::GetCurrentViewPosition */
+static FVector GetListenerPosition(const AActor* ContextActor)
+{
+	if (!ContextActor || !ContextActor->GetWorld()) return FVector::ZeroVector;
+	UWorld* World = ContextActor->GetWorld();
+
+	// 1. PlayerCameraManager（最精确）
+	if (APlayerController* PC = World->GetFirstPlayerController())
+	{
+		if (APlayerCameraManager* CamMgr = PC->PlayerCameraManager)
+		{
+			return CamMgr->GetCameraLocation();
+		}
+		// 2. ViewTarget
+		if (const AActor* ViewTarget = PC->GetViewTarget())
+		{
+			return ViewTarget->GetActorLocation();
+		}
+		// 3. Pawn
+		if (const APawn* Pawn = PC->GetPawnOrSpectator())
+		{
+			return Pawn->GetActorLocation();
+		}
+	}
+
+	// 4. 兜底：Actor 自身位置
+	return ContextActor->GetActorLocation();
+}
 
 AIceMoonAcousticField::AIceMoonAcousticField()
 {
@@ -117,7 +145,7 @@ void AIceMoonAcousticField::Tick(float DeltaTime)
 				const FIntVector& GridCoord = CellPair.Key;
 				const FIM_GridAudioCell& Cell = CellPair.Value;
 
-				const FIM_AudioReverbParameters ReverbParams = CalculateCellReverbParameters(FVector::ZeroVector, Cell);
+				const FIM_AudioReverbParameters ReverbParams = CalculateCellReverbParameters(FVector::ZeroVector, Cell, FVector::ZeroVector);
 				DrawColor.A = static_cast<uint8>(FMath::Clamp(ReverbParams.Wet * 200.0f + 20.0f, 20.0f, 220.0f));
 				
 				// 计算cell的中心位置（Z轴使用钳制后的尺寸）
@@ -175,9 +203,25 @@ AIceMoonAcousticField* AIceMoonAcousticField::GetAcousticFieldActor(const UObjec
 		UGameplayStatics::GetActorOfClass(World, AIceMoonAcousticField::StaticClass())
 	);
 
-	// 4. 不存在则创建 (新增逻辑)
+	// 4. 不存在则检查是否允许自动创建
 	if (!ResultActor)
 	{
+		// 读取 CDO 上的 ConfigAsset 检查 auto-create 开关
+		bool bAutoCreate = true; // 默认允许（保持 drop-in 行为）
+		if (const AIceMoonAcousticField* CDO = GetMutableDefault<AIceMoonAcousticField>())
+		{
+			if (const UDA_IM_AcousticFieldConfig* Config = CDO->ConfigAsset.Get())
+			{
+				bAutoCreate = Config->bAutoCreateAcousticFieldActor;
+			}
+		}
+
+		if (!bAutoCreate)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[IM] GetAcousticFieldActor: Auto-create disabled by config, returning null."));
+			return nullptr;
+		}
+
 		// 防御性：避免在构建脚本(Construction Script)或不安全的时机生成
 		if (!World->IsGameWorld())
 		{
@@ -218,7 +262,7 @@ void AIceMoonAcousticField::AsyncFireProbes( FVector Origin, int32 NumTraces, fl
 	FTraceDelegate TraceDelegate;
 	TraceDelegate.BindUObject(this, &AIceMoonAcousticField::OnAsyncTraceComplete);
 	TArray<FVector> SampleDirections;
-	IMMathUtils::GetFibonacciSphereSamples(SampleDirections, NumTraces, Direction, ConeDegree, true, RandomSeed);
+	IMAcousticFieldMath::GetFibonacciSphereSamples(SampleDirections, NumTraces, Direction, ConeDegree, true, RandomSeed);
 
 	FCollisionQueryParams Params;
 	Params.bReturnPhysicalMaterial = true;
@@ -472,10 +516,15 @@ FIM_AudioMaterialResponse AIceMoonAcousticField::GetAudioResponseForMaterial(con
 }
 
 
-bool AIceMoonAcousticField::QueryAcousticField(FVector QueryLocation, FIM_AudioReverbParameters& OutResponse)
+bool AIceMoonAcousticField::QueryAcousticField(FVector QueryLocation, FIM_AudioReverbParameters& OutResponse, const FVector& OverrideListenerLocation)
 {
 	SCOPE_CYCLE_COUNTER(STAT_IMAcousticField_Query);
 	LastQueryTime = GetWorld()->GetTimeSeconds();
+
+	// 解析 listener 位置：显式覆盖优先，否则自动查询
+	const FVector ListenerLocation = OverrideListenerLocation.IsNearlyZero()
+		? GetListenerPosition(this)
+		: OverrideListenerLocation;
 
 	if (AcousticGridArray.IsEmpty())
 	{
@@ -541,7 +590,7 @@ bool AIceMoonAcousticField::QueryAcousticField(FVector QueryLocation, FIM_AudioR
 		int32 Cells = 0, Probes = 0, Hits = 0;
 
 		// 每个LOD都做插值查询（搜索周围格子）
-		if (InterpolateAtLod(LodIndex, QueryLocation, LodResponse, &Cells, &Probes, &Hits))
+		if (InterpolateAtLod(LodIndex, QueryLocation, LodResponse, ListenerLocation, &Cells, &Probes, &Hits))
 		{
 			// 获取该LOD的固定权重
 			const float LodWeight = (LodIndex < LodWeights.Num()) ? LodWeights[LodIndex] : 0.1f;
@@ -658,7 +707,7 @@ bool AIceMoonAcousticField::GetAcousticFieldExtentCells(int32 LodIndex, FVector 
 	Gain   不管    纯粹的工程控制。它就是混音师调整音量用的，用于确保混响不会太大或太小
 	Bandwidth  不管   很多时候，低频混响会使混音变得泥泞（Muddy），高频混响会很刺耳。Bandwidth 允许工程师切掉不需要的频率，与声场物理无关。
 */
-FIM_AudioReverbParameters AIceMoonAcousticField::CalculateCellReverbParameters(const FVector QueryPos, const FIM_GridAudioCell& CellResults)
+FIM_AudioReverbParameters AIceMoonAcousticField::CalculateCellReverbParameters(const FVector QueryPos, const FIM_GridAudioCell& CellResults, const FVector& ListenerLocation)
 {
 	if (CellResults.RayRes.RayHitCount == 0) return FIM_AudioReverbParameters();
 	FIM_AudioReverbParameters Reverb;
@@ -688,7 +737,7 @@ FIM_AudioReverbParameters AIceMoonAcousticField::CalculateCellReverbParameters(c
 	const float AvgDistanceM = AvgDistanceCm * 0.01f; // 转换为米
 
 	// 距离映射：封闭阈值内（小房间）→1.0, 开放阈值外（开阔空间）→0.0
-	const float ClosureFactor = IMMathUtils::Remap_Sat<float>(
+	const float ClosureFactor = IMAcousticFieldMath::Remap_Sat<float>(
 		WetParams.WetOpenDistanceThreshold,
 		WetParams.WetClosedDistanceThreshold,
 		0.0f, 1.0f, AvgDistanceM);
@@ -696,7 +745,7 @@ FIM_AudioReverbParameters AIceMoonAcousticField::CalculateCellReverbParameters(c
 	// 2. 墙壁覆盖率（射线命中率）
 	const float HitRate = static_cast<float>(CellResults.RayRes.RayHitCount) / static_cast<float>(CellResults.RayRes.ProbeCount);
 	// 平滑插值：命中率阈值控制混响强弱
-	const float HitRateFactor = IMMathUtils::Smoothstep_Sat<float>(
+	const float HitRateFactor = IMAcousticFieldMath::Smoothstep_Sat<float>(
 		WetParams.WetHitRateLow,
 		WetParams.WetHitRateHigh,
 		HitRate);
@@ -726,7 +775,7 @@ FIM_AudioReverbParameters AIceMoonAcousticField::CalculateCellReverbParameters(c
 	// 4. 最短距离修正（靠墙时增强混响）
 	// 如果最短距离很近，说明靠近墙壁，应该增强混响
 	const float MinDistM = CellResults.RayRes.MinDistance * 0.01f;
-	const float NearWallBoost = IMMathUtils::Remap_Sat<float>(
+	const float NearWallBoost = IMAcousticFieldMath::Remap_Sat<float>(
 		2.0f,
 		WetParams.WetNearWallDistance,
 		0.0f,
@@ -742,7 +791,7 @@ FIM_AudioReverbParameters AIceMoonAcousticField::CalculateCellReverbParameters(c
 	const float SaturationRate = 2.5f;
 	Reverb.Wet = WetParams.MaxWetValue * (1.0f - FMath::Exp(-SaturationRate * WetRaw));
 	
-	FVector3d camPos = IMViewUtils::GetCurrentViewPosition(this);
+	FVector3d camPos = ListenerLocation;
 	//FVector camPos = FVector();
 	float mindis = CellResults.RayRes.MinDistance;
 	FVector hitPos = CellResults.RayRes.AveHitLocation;
@@ -768,7 +817,7 @@ FIM_AudioReverbParameters AIceMoonAcousticField::CalculateCellReverbParameters(c
 	return Reverb;
 }
 
-bool AIceMoonAcousticField::InterpolateAtLod(const int32 LodIndex, const FVector QueryLocation, FIM_AudioReverbParameters& OutInterpolatedResponse, int32* OutCells, int32* OutProbes, int32* OutHits)
+bool AIceMoonAcousticField::InterpolateAtLod(const int32 LodIndex, const FVector QueryLocation, FIM_AudioReverbParameters& OutInterpolatedResponse, const FVector& ListenerLocation, int32* OutCells, int32* OutProbes, int32* OutHits)
 {
 	// TODO: [高优先级] GPU SDF空间连续性检测系统
 	// 详细架构方案和GPU延迟处理策略请查看：IM_AcousticTypes.h:75-155
@@ -842,7 +891,7 @@ bool AIceMoonAcousticField::InterpolateAtLod(const int32 LodIndex, const FVector
 		const float MinDistanceSqr = 1.0f;
 		if (DistanceSqr < MinDistanceSqr) // 如果点1m内 就直接用这个单元格的数据
 		{
-			OutInterpolatedResponse = CalculateCellReverbParameters(QueryLocation, Cell);
+			OutInterpolatedResponse = CalculateCellReverbParameters(QueryLocation, Cell, ListenerLocation);
 #if WITH_EDITOR
 			if(CVar_DebugLevelStat.GetValueOnGameThread() > 0)
 			{
@@ -860,7 +909,7 @@ bool AIceMoonAcousticField::InterpolateAtLod(const int32 LodIndex, const FVector
 		}
 
 		const float TimeSinceUpdate = GetWorld()->GetTimeSeconds() - Cell.LastUpdateTime;
-		const float TimeWeight = IMMathUtils::Remap_Sat<float>(5.0, 30.0, 1.0, 0.2, TimeSinceUpdate); //时间权重
+		const float TimeWeight = IMAcousticFieldMath::Remap_Sat<float>(5.0, 30.0, 1.0, 0.2, TimeSinceUpdate); //时间权重
 		const float ClampedVariance = Cell.RayRes.AveVariance / 2000.0;  // todo 有问题 1m平方就 10000了
 		const float Confidence = 1.0f / (1.0f + ClampedVariance *  0.0001f); // 方差越大，可信度越低 说明空间均匀性很差  todo 默认先0.0001f后面调整 暴露出来
 		const float Weight = (1.0f / DistanceSqr) * TimeWeight * Confidence;
@@ -873,7 +922,7 @@ bool AIceMoonAcousticField::InterpolateAtLod(const int32 LodIndex, const FVector
 			continue; // 跳过权重过小的单元格
 		}
 
-		FIM_AudioReverbParameters currnetParameter = CalculateCellReverbParameters(QueryLocation, Cell);
+		FIM_AudioReverbParameters currnetParameter = CalculateCellReverbParameters(QueryLocation, Cell, ListenerLocation);
 		// 累加所有参数
 		AccumulatedResponse.Wet +=  currnetParameter.Wet * Weight;
 		AccumulatedResponse.Delay += currnetParameter.Delay * Weight;
@@ -1002,7 +1051,8 @@ bool AIceMoonAcousticField::QueryAcousticFieldSmooth(
 	FName SoundSlot,
 	FVector QueryLocation,
 	FIM_AudioReverbParameters& OutResponse,
-	float SmoothSpeed)
+	float SmoothSpeed,
+	const FVector& OverrideListenerLocation)
 {
 #if WITH_EDITOR
 	if(CVar_DebugLevelStat.GetValueOnGameThread() > 0)
@@ -1032,7 +1082,7 @@ bool AIceMoonAcousticField::QueryAcousticFieldSmooth(
 
 	// 查询当前原始数据
 	FIM_AudioReverbParameters RawResponse;
-	const bool bFoundData = QueryAcousticField(QueryLocation, RawResponse);
+	const bool bFoundData = QueryAcousticField(QueryLocation, RawResponse, OverrideListenerLocation);
 
 	// 确定目标混响参数（找到数据用查询结果，否则用配置的默认值）
 	const FIM_AudioReverbParameters TargetResponse = bFoundData ? RawResponse : GetDefaultReverbParameters();
@@ -1062,7 +1112,7 @@ bool AIceMoonAcousticField::QueryAcousticFieldSmooth(
 	const float WetChange = FMath::Abs(TargetResponse.Wet - Cache->LastResult.Wet);
 
 	// 自适应因子：小变化→1.0（慢速平滑），大变化→0.25（快速响应，4倍加速）
-	const float AdaptiveFactor = IMMathUtils::Remap_Sat<float>(0.075f, 0.2f, 1.0f, 0.25f, WetChange);
+	const float AdaptiveFactor = IMAcousticFieldMath::Remap_Sat<float>(0.075f, 0.2f, 1.0f, 0.25f, WetChange);
 	const float EffectiveSmoothSpeed = SmoothSpeed * AdaptiveFactor;
 
 	// 指数平滑：Alpha = 1 - e^(-Δt / τ)

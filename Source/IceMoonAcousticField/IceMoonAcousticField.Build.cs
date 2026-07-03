@@ -28,9 +28,6 @@ public class IceMoonAcousticField : ModuleRules
 				"Core",
 				"Engine",
 				"PhysicsCore",
-				"IM_Common",
-				
-				// ... add other public dependencies that you statically link with here ...
 			}
 			);
 			
@@ -43,9 +40,6 @@ public class IceMoonAcousticField : ModuleRules
 				"Slate",
 				"SlateCore",
 				"PhysicsCore",
-				"IM_Common",
-				"IceMoonBlueprintGPUMathUtilities"
-				// ... add private dependencies that you statically link with here ...	
 			}
 			);
 		

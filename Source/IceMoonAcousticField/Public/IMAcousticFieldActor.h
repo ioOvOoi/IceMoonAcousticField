@@ -5,13 +5,13 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "IM_AcousticTypes.h"
-#include "IM_Common/Public/Gameplay/IMStats.h"
 
 #include "IMAcousticFieldActor.generated.h"
 
-DECLARE_CYCLE_STAT_EXTERN(TEXT("IMAcousticField Tick"), STAT_IMAcousticField_Tick, STATGROUP_IM, ICEMOONACOUSTICFIELD_API);
-DECLARE_CYCLE_STAT_EXTERN(TEXT("IMAcousticField Callback"), STAT_IMAcousticField_TraceCallback, STATGROUP_IM, ICEMOONACOUSTICFIELD_API);
-DECLARE_CYCLE_STAT_EXTERN(TEXT("IMAcousticField Query"), STAT_IMAcousticField_Query, STATGROUP_IM, ICEMOONACOUSTICFIELD_API)
+DECLARE_STATS_GROUP(TEXT("IMAcousticField"), STATGROUP_IMAcousticField, STATCAT_Advanced);
+DECLARE_CYCLE_STAT_EXTERN(TEXT("IMAcousticField Tick"), STAT_IMAcousticField_Tick, STATGROUP_IMAcousticField, ICEMOONACOUSTICFIELD_API);
+DECLARE_CYCLE_STAT_EXTERN(TEXT("IMAcousticField Callback"), STAT_IMAcousticField_TraceCallback, STATGROUP_IMAcousticField, ICEMOONACOUSTICFIELD_API);
+DECLARE_CYCLE_STAT_EXTERN(TEXT("IMAcousticField Query"), STAT_IMAcousticField_Query, STATGROUP_IMAcousticField, ICEMOONACOUSTICFIELD_API)
 
 static TAutoConsoleVariable<int32> CVar_DebugLevelStat(
     TEXT("Icemoon.AcousticField.debug"),
@@ -91,7 +91,8 @@ public:
     
     // 临近查询 如果有多个则插值
     UFUNCTION(BlueprintCallable, Category = "IM|Acoustics")
-    bool QueryAcousticField(FVector QueryLocation, FIM_AudioReverbParameters& OutResponse);
+    bool QueryAcousticField(FVector QueryLocation, FIM_AudioReverbParameters& OutResponse, 
+        FVector OverrideListenerLocation = FVector::ZeroVector);
 
     /**
      * [平滑查询] 带指数平滑的声场查询，专为AnimNotify等离散采样事件设计
@@ -113,7 +114,8 @@ public:
         FName SoundSlot,
         FVector QueryLocation,
         FIM_AudioReverbParameters& OutResponse,
-        float SmoothSpeed = 3.0f);
+        float SmoothSpeed = 3.0f,
+        FVector OverrideListenerLocation = FVector::ZeroVector);
 
     /**
      * [清理缓存] 手动清理指定对象的平滑查询缓存
@@ -228,10 +230,10 @@ private:
      * @param HitResults 一批发声源周围的射线检测结果。
      * @return 计算出的FAIM_AudioMaterialResponse。
      */
-    FIM_AudioReverbParameters CalculateCellReverbParameters(const FVector QueryPos,const FIM_GridAudioCell& CellResults);
+    FIM_AudioReverbParameters CalculateCellReverbParameters(const FVector QueryPos,const FIM_GridAudioCell& CellResults, const FVector& ListenerLocation);
 
     void AddAudioFieldForLod(const FHitResult& HitResult);
-    bool InterpolateAtLod(const int32 LodIndex, const FVector QueryLocation, FIM_AudioReverbParameters& OutInterpolatedResponse, int32* OutCells = nullptr, int32* OutProbes = nullptr, int32* OutHits = nullptr);
+    bool InterpolateAtLod(const int32 LodIndex, const FVector QueryLocation, FIM_AudioReverbParameters& OutInterpolatedResponse, const FVector& ListenerLocation, int32* OutCells = nullptr, int32* OutProbes = nullptr, int32* OutHits = nullptr);
     void TickTrimAudioFieldForLod(const float GameTime);
 
     // 配置获取辅助函数（优先使用Override，否则使用ConfigAsset）

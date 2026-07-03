@@ -62,6 +62,15 @@ public:
 	FString ConfigDescription;
 
 	// ========================================
+	// 运行时行为
+	// ========================================
+
+	/** 是否允许在缺少声场 Actor 时自动创建（默认开启，保证 drop-in 体验） */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "5. Runtime",
+		meta=(Tooltip="禁用后，若关卡中未放置声场 Actor，查询将返回失败而非自动创建"))
+	bool bAutoCreateAcousticFieldActor = true;
+
+	// ========================================
 	// 辅助访问函数
 	// ========================================
 
