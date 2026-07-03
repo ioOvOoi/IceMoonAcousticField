@@ -516,7 +516,7 @@ FIM_AudioMaterialResponse AIceMoonAcousticField::GetAudioResponseForMaterial(con
 }
 
 
-bool AIceMoonAcousticField::QueryAcousticField(FVector QueryLocation, FIM_AudioReverbParameters& OutResponse, const FVector& OverrideListenerLocation)
+bool AIceMoonAcousticField::QueryAcousticField(FVector QueryLocation, FIM_AudioReverbParameters& OutResponse, FVector OverrideListenerLocation)
 {
 	SCOPE_CYCLE_COUNTER(STAT_IMAcousticField_Query);
 	LastQueryTime = GetWorld()->GetTimeSeconds();
@@ -1052,7 +1052,7 @@ bool AIceMoonAcousticField::QueryAcousticFieldSmooth(
 	FVector QueryLocation,
 	FIM_AudioReverbParameters& OutResponse,
 	float SmoothSpeed,
-	const FVector& OverrideListenerLocation)
+	FVector OverrideListenerLocation)
 {
 #if WITH_EDITOR
 	if(CVar_DebugLevelStat.GetValueOnGameThread() > 0)
